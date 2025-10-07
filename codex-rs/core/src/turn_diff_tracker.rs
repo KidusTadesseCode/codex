@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -11,6 +12,7 @@ use sha1::digest::Output;
 use uuid::Uuid;
 
 use crate::protocol::FileChange;
+use crate::codexignore::CodexIgnore;
 
 const ZERO_OID: &str = "0000000000000000000000000000000000000000";
 const DEV_NULL: &str = "/dev/null";
@@ -40,11 +42,16 @@ pub struct TurnDiffTracker {
     temp_name_to_current_path: HashMap<String, PathBuf>,
     /// Cache of known git worktree roots to avoid repeated filesystem walks.
     git_root_cache: Vec<PathBuf>,
+    codex_ignore: Option<Arc<CodexIgnore>>,
 }
 
 impl TurnDiffTracker {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_codex_ignore(&mut self, codex_ignore: Option<Arc<CodexIgnore>>) {
+        self.codex_ignore = codex_ignore;
     }
 
     /// Front-run apply patch calls to track the starting contents of any modified files.
@@ -53,6 +60,9 @@ impl TurnDiffTracker {
     /// - Also updates internal mappings for move/rename events.
     pub fn on_patch_begin(&mut self, changes: &HashMap<PathBuf, FileChange>) {
         for (path, change) in changes.iter() {
+            if !self.should_track(path) {
+                continue;
+            }
             // Ensure a stable internal filename exists for this external path.
             if !self.external_to_temp_name.contains_key(path) {
                 let internal = Uuid::new_v4().to_string();
@@ -99,6 +109,9 @@ impl TurnDiffTracker {
                 ..
             } = change
             {
+                if !self.should_track(dest) {
+                    continue;
+                }
                 let uuid_filename = match self.external_to_temp_name.get(path) {
                     Some(i) => i.clone(),
                     None => {
@@ -125,6 +138,12 @@ impl TurnDiffTracker {
                     .insert(dest.clone(), uuid_filename);
             };
         }
+    }
+
+    fn should_track(&self, path: &Path) -> bool {
+        self.codex_ignore
+            .as_ref()
+            .map_or(true, |ignore| !ignore.is_file_ignored(path))
     }
 
     fn get_path_for_internal(&self, internal: &str) -> Option<PathBuf> {

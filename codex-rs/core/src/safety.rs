@@ -3,13 +3,13 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 
-use codex_apply_patch::ApplyPatchAction;
-use codex_apply_patch::ApplyPatchFileChange;
-
 use crate::exec::SandboxType;
 use crate::is_safe_command::is_known_safe_command;
 use crate::protocol::AskForApproval;
 use crate::protocol::SandboxPolicy;
+use crate::codexignore::CodexIgnore;
+use codex_apply_patch::ApplyPatchAction;
+use codex_apply_patch::ApplyPatchFileChange;
 
 #[derive(Debug, PartialEq)]
 pub enum SafetyCheck {
@@ -23,11 +23,45 @@ pub fn assess_patch_safety(
     policy: AskForApproval,
     sandbox_policy: &SandboxPolicy,
     cwd: &Path,
+    codex_ignore: Option<&CodexIgnore>,
 ) -> SafetyCheck {
     if action.is_empty() {
         return SafetyCheck::Reject {
             reason: "empty patch".to_string(),
         };
+    }
+
+    if let Some(ignore) = codex_ignore {
+        for (path, change) in action.changes() {
+            if ignore.is_file_ignored(path) {
+                let display = ignore
+                    .relative_path(path)
+                    .unwrap_or_else(|| path.to_path_buf());
+                return SafetyCheck::Reject {
+                    reason: format!(
+                        "path `{}` is ignored by .codexignore",
+                        display.display()
+                    ),
+                };
+            }
+            if let ApplyPatchFileChange::Update {
+                move_path: Some(dest),
+                ..
+            } = change
+            {
+                if ignore.is_file_ignored(dest) {
+                    let display = ignore
+                        .relative_path(dest)
+                        .unwrap_or_else(|| dest.to_path_buf());
+                    return SafetyCheck::Reject {
+                        reason: format!(
+                            "path `{}` is ignored by .codexignore",
+                            display.display()
+                        ),
+                    };
+                }
+            }
+        }
     }
 
     match policy {
@@ -253,7 +287,33 @@ fn is_write_patch_constrained_to_writable_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codexignore::CodexIgnore;
+    use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn rejects_when_path_matches_codexignore() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path();
+        fs::write(cwd.join(".codexignore"), "secret.txt\n").unwrap();
+        let codex_ignore = CodexIgnore::load_from_root(cwd).unwrap().unwrap();
+
+        let patch = ApplyPatchAction::new_add_for_test(&cwd.join("secret.txt"), "content".to_string());
+        let result = assess_patch_safety(
+            &patch,
+            AskForApproval::OnFailure,
+            &SandboxPolicy::DangerFullAccess,
+            cwd,
+            Some(&codex_ignore),
+        );
+
+        assert_eq!(
+            result,
+            SafetyCheck::Reject {
+                reason: "path `secret.txt` is ignored by .codexignore".to_string(),
+            }
+        );
+    }
 
     #[test]
     fn test_writable_roots_constraint() {

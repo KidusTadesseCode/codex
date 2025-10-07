@@ -51,6 +51,7 @@ pub(crate) async fn apply_patch(
         turn_context.approval_policy,
         &turn_context.sandbox_policy,
         &turn_context.cwd,
+        turn_context.codex_ignore.as_deref(),
     ) {
         SafetyCheck::AutoApprove { .. } => {
             InternalApplyPatchInvocation::DelegateToExec(ApplyPatchExec {

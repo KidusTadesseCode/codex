@@ -64,6 +64,10 @@ You can give Codex extra instructions and guidance using `AGENTS.md` files. Code
 
 For more information on how to use AGENTS.md, see the [official AGENTS.md documentation](https://agents.md/).
 
+### Hiding files with `.codexignore`
+
+Add a `.codexignore` file to the root of your project to keep Codex from automatically surfacing certain files or directories. The syntax matches `.gitignore`, so directory patterns (like `docs/`), wildcards, and negation all work as expected. Paths excluded this way are skipped by file search, project doc discovery, automatic apply-patch edits, and local image attachments.
+
 ### Tips & shortcuts
 
 #### Use `@` for file search

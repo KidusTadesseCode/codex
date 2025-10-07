@@ -152,6 +152,7 @@ pub fn run(
     // that we can leverage the parallelism it provides.
     let mut walk_builder = WalkBuilder::new(search_directory);
     walk_builder
+        .add_custom_ignore_filename(".codexignore")
         .threads(num_walk_builder_threads)
         // Allow hidden entries.
         .hidden(false)
@@ -283,6 +284,41 @@ pub fn run(
         matches,
         total_match_count,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::num::NonZeroUsize;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use tempfile::tempdir;
+
+    #[test]
+    fn skips_entries_listed_in_codexignore() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join(".codexignore"), "secret.txt\n").unwrap();
+        fs::write(root.join("secret.txt"), "secret").unwrap();
+        fs::write(root.join("visible.txt"), "visible").unwrap();
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let results = run(
+            "txt",
+            NonZeroUsize::new(10).unwrap(),
+            root,
+            Vec::new(),
+            NonZeroUsize::new(1).unwrap(),
+            cancel,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(results.total_match_count, 1);
+        assert_eq!(results.matches.len(), 1);
+        assert!(results.matches[0].path.ends_with("visible.txt"));
+    }
 }
 
 /// Sort matches in-place by descending score, then ascending path.

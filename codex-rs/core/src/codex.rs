@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -33,6 +34,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::ModelProviderInfo;
+use crate::codexignore::CodexIgnore;
 use crate::apply_patch;
 use crate::apply_patch::ApplyPatchExec;
 use crate::apply_patch::CODEX_APPLY_PATCH_ARG1;
@@ -303,6 +305,7 @@ pub(crate) struct TurnContext {
     pub(crate) sandbox_policy: SandboxPolicy,
     pub(crate) shell_environment_policy: ShellEnvironmentPolicy,
     pub(crate) tools_config: ToolsConfig,
+    pub(crate) codex_ignore: Option<Arc<CodexIgnore>>,
 }
 
 impl TurnContext {
@@ -310,6 +313,30 @@ impl TurnContext {
         path.as_ref()
             .map(PathBuf::from)
             .map_or_else(|| self.cwd.clone(), |p| self.cwd.join(p))
+    }
+
+    fn is_path_ignored(&self, path: &Path, is_dir: bool) -> bool {
+        self.codex_ignore.as_ref().map_or(false, |ignore| {
+            if is_dir {
+                ignore.is_dir_ignored(path)
+            } else {
+                ignore.is_file_ignored(path)
+            }
+        })
+    }
+
+    fn is_file_ignored(&self, path: &Path) -> bool {
+        self.is_path_ignored(path, false)
+    }
+}
+
+fn load_codex_ignore(cwd: &Path) -> Option<Arc<CodexIgnore>> {
+    match CodexIgnore::load_from_root(cwd) {
+        Ok(ignore) => ignore.map(Arc::new),
+        Err(err) => {
+            warn!("Failed to load .codexignore: {err:#}");
+            None
+        }
     }
 }
 
@@ -441,6 +468,7 @@ impl Session {
             model_reasoning_summary,
             session_id,
         );
+        let codex_ignore = load_codex_ignore(&cwd);
         let turn_context = TurnContext {
             client,
             tools_config: ToolsConfig::new(&ToolsConfigParams {
@@ -459,6 +487,7 @@ impl Session {
             sandbox_policy,
             shell_environment_policy: config.shell_environment_policy.clone(),
             cwd,
+            codex_ignore: codex_ignore.clone(),
         };
         let sess = Arc::new(Session {
             session_id,
@@ -1104,6 +1133,12 @@ async fn submission_loop(
                     include_view_image_tool: config.include_view_image_tool,
                 });
 
+                let new_codex_ignore = if cwd.is_some() {
+                    load_codex_ignore(&new_cwd)
+                } else {
+                    prev.codex_ignore.clone()
+                };
+
                 let new_turn_context = TurnContext {
                     client,
                     tools_config,
@@ -1113,6 +1148,7 @@ async fn submission_loop(
                     sandbox_policy: new_sandbox_policy.clone(),
                     shell_environment_policy: prev.shell_environment_policy.clone(),
                     cwd: new_cwd.clone(),
+                    codex_ignore: new_codex_ignore,
                 };
 
                 // Install the new persistent context for subsequent tasks/turns.
@@ -1175,6 +1211,12 @@ async fn submission_loop(
                         sess.session_id,
                     );
 
+                    let codex_ignore = if cwd != turn_context.cwd {
+                        load_codex_ignore(&cwd)
+                    } else {
+                        turn_context.codex_ignore.clone()
+                    };
+
                     let fresh_turn_context = TurnContext {
                         client,
                         tools_config: ToolsConfig::new(&ToolsConfigParams {
@@ -1194,6 +1236,7 @@ async fn submission_loop(
                         sandbox_policy,
                         shell_environment_policy: turn_context.shell_environment_policy.clone(),
                         cwd,
+                        codex_ignore,
                     };
                     // TODO: record the new environment context in the conversation history
                     // no current task, spawn a new one with the per‑turn context
@@ -1408,6 +1451,7 @@ async fn run_task(
     // Although from the perspective of codex.rs, TurnDiffTracker has the lifecycle of a Task which contains
     // many turns, from the perspective of the user, it is a single turn.
     let mut turn_diff_tracker = TurnDiffTracker::new();
+    turn_diff_tracker.set_codex_ignore(turn_context.codex_ignore.clone());
 
     loop {
         // Note that pending_input would be something like a message the user
@@ -2083,6 +2127,23 @@ async fn handle_function_call(
                 }
             };
             let abs = turn_context.resolve_path(Some(args.path));
+            if turn_context.is_file_ignored(&abs) {
+                let display = turn_context
+                    .codex_ignore
+                    .as_ref()
+                    .and_then(|ignore| ignore.relative_path(&abs))
+                    .unwrap_or_else(|| abs.clone());
+                return ResponseInputItem::FunctionCallOutput {
+                    call_id,
+                    output: FunctionCallOutputPayload {
+                        content: format!(
+                            "path `{}` is ignored by .codexignore",
+                            display.display()
+                        ),
+                        success: Some(false),
+                    },
+                };
+            }
             let output = match sess.inject_input(vec![InputItem::LocalImage { path: abs }]) {
                 Ok(()) => FunctionCallOutputPayload {
                     content: "attached local image path".to_string(),

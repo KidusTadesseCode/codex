@@ -12,6 +12,7 @@
 //!     that order.
 //! 3.  We do **not** walk past the Git root.
 
+use crate::codexignore::CodexIgnore;
 use crate::config::Config;
 use std::path::PathBuf;
 use tokio::io::AsyncReadExt;
@@ -107,6 +108,13 @@ pub async fn read_project_docs(config: &Config) -> std::io::Result<Option<String
 /// directory (inclusive). Symlinks are allowed. When `project_doc_max_bytes`
 /// is zero, returns an empty list.
 pub fn discover_project_doc_paths(config: &Config) -> std::io::Result<Vec<PathBuf>> {
+    let codex_ignore = match CodexIgnore::load_from_root(&config.cwd) {
+        Ok(ignore) => ignore,
+        Err(err) => {
+            tracing::warn!("failed to load .codexignore: {err:#}");
+            None
+        }
+    };
     let mut dir = config.cwd.clone();
     if let Ok(canon) = dir.canonicalize() {
         dir = canon;
@@ -160,7 +168,12 @@ pub fn discover_project_doc_paths(config: &Config) -> std::io::Result<Vec<PathBu
                     let ft = md.file_type();
                     // Allow regular files and symlinks; opening will later fail for dangling links.
                     if ft.is_file() || ft.is_symlink() {
-                        found.push(candidate);
+                        if codex_ignore
+                            .as_ref()
+                            .map_or(true, |ignore| !ignore.is_file_ignored(&candidate))
+                        {
+                            found.push(candidate);
+                        }
                         break;
                     }
                 }
@@ -200,6 +213,18 @@ mod tests {
 
         config.user_instructions = instructions.map(ToOwned::to_owned);
         config
+    }
+
+    #[test]
+    fn ignores_docs_listed_in_codexignore() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::write(root.join("AGENTS.md"), "root doc").unwrap();
+        fs::write(root.join(".codexignore"), "AGENTS.md\n").unwrap();
+
+        let config = make_config(&tmp, 1024, None);
+        let paths = discover_project_doc_paths(&config).unwrap();
+        assert!(paths.is_empty());
     }
 
     /// AGENTS.md missing – should yield `None`.
